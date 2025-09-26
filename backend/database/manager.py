@@ -1,4 +1,4 @@
-"""Database operations manager"""
+"""Database operations manager with dynamic categories"""
 
 import sqlite3
 from typing import Dict, List, Optional, Any
@@ -31,7 +31,7 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
-                color TEXT
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             
             CREATE INDEX IF NOT EXISTS idx_date ON transactions(date);
@@ -39,34 +39,40 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_merchant ON transactions(merchant);
         """)
         self.conn.commit()
-        self._init_default_categories()
     
-    def _init_default_categories(self):
-        """Insert default categories"""
-        categories = [
-            ('AI Services', '#8b5cf6'),
-            ('Cloud Services', '#3b82f6'),
-            ('Entertainment', '#ec4899'),
-            ('Health & Fitness', '#10b981'),
-            ('Transportation', '#f59e0b'),
-            ('Food & Dining', '#ef4444'),
-            ('Shopping', '#06b6d4'),
-            ('Services', '#84cc16'),
-            ('Insurance', '#f97316'),
-            ('Parking', '#64748b'),
-            ('Uncategorized', '#9ca3af')
-        ]
-        
-        for name, color in categories:
-            self.conn.execute(
-                "INSERT OR IGNORE INTO categories (name, color) VALUES (?, ?)",
-                (name, color)
+    def ensure_category_exists(self, category_name: str) -> None:
+        """Add category if it doesn't exist"""
+        if category_name and category_name.strip():
+            try:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO categories (name) VALUES (?)",
+                    (category_name.strip(),)
+                )
+                self.conn.commit()
+            except Exception as e:
+                logger.error(f"Error adding category {category_name}: {e}")
+    
+    def get_all_categories(self) -> List[str]:
+        """Get all unique categories from both the categories table and transactions"""
+        cursor = self.conn.execute("""
+            SELECT DISTINCT name FROM (
+                SELECT name FROM categories
+                UNION
+                SELECT DISTINCT category as name FROM transactions 
+                WHERE category IS NOT NULL AND category != ''
             )
-        self.conn.commit()
+            ORDER BY name
+        """)
+        return [row['name'] for row in cursor.fetchall()]
     
     def save_transaction(self, transaction: Dict[str, Any]) -> bool:
         """Save a transaction to database"""
         try:
+            # Ensure the category exists
+            category = transaction.get('category', 'Uncategorized')
+            if category:
+                self.ensure_category_exists(category)
+            
             self.conn.execute("""
                 INSERT OR REPLACE INTO transactions 
                 (id, date, merchant, description, amount, category, confidence)
@@ -77,7 +83,7 @@ class DatabaseManager:
                 transaction['merchant'],
                 transaction['description'],
                 transaction['amount'],
-                transaction.get('category', 'Uncategorized'),
+                category,
                 transaction.get('confidence', 0.0)
             ))
             self.conn.commit()
@@ -110,6 +116,10 @@ class DatabaseManager:
     def update_transaction(self, transaction_id: str, updates: Dict) -> bool:
         """Update a transaction"""
         try:
+            # If updating category, ensure it exists
+            if 'category' in updates:
+                self.ensure_category_exists(updates['category'])
+            
             set_clauses = []
             params = []
             
@@ -127,3 +137,17 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Update error: {e}")
             return False
+    
+    def get_category_spending(self, start_date: str, end_date: str) -> Dict[str, float]:
+        """Get spending breakdown by category"""
+        cursor = self.conn.execute("""
+            SELECT category, SUM(ABS(amount)) as total
+            FROM transactions
+            WHERE amount < 0 
+                AND date >= ? 
+                AND date <= ?
+            GROUP BY category
+            ORDER BY total DESC
+        """, (start_date, end_date))
+        
+        return {row['category']: row['total'] for row in cursor.fetchall()}
