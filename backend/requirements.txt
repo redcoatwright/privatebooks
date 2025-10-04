@@ -6,6 +6,9 @@ python-dateutil>=2.8.0
 # Database
 # SQLite3 is included with Python
 
+# Security
+bcrypt>=4.0.0
+
 # PDF parsing (optional)
 PyPDF2>=3.0.0
 pdfplumber>=0.9.0

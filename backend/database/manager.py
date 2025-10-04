@@ -37,6 +37,12 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_date ON transactions(date);
             CREATE INDEX IF NOT EXISTS idx_category ON transactions(category);
             CREATE INDEX IF NOT EXISTS idx_merchant ON transactions(merchant);
+            
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.conn.commit()
         self._init_default_categories()
@@ -127,3 +133,35 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Update error: {e}")
             return False
+    
+    def get_setting(self, key: str) -> Optional[str]:
+        """Get a setting value by key"""
+        try:
+            cursor = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row['value'] if row else None
+        except Exception as e:
+            logger.error(f"Get setting error: {e}")
+            return None
+    
+    def set_setting(self, key: str, value: str) -> bool:
+        """Set a setting value"""
+        try:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            """, (key, value))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Set setting error: {e}")
+            return False
+    
+    def get_categories(self) -> List[Dict]:
+        """Get all categories"""
+        try:
+            cursor = self.conn.execute("SELECT * FROM categories ORDER BY name")
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Get categories error: {e}")
+            return []
