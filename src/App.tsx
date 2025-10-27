@@ -5,6 +5,64 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import LoginScreen from './components/LoginScreen';
 import ProfilePage from './components/ProfilePage';
 
+// Golden Angle Color Generator
+// Uses the golden angle (137.508°) to generate maximally distinct hues
+// Combined with name-based hashing for consistent color assignment
+const GOLDEN_ANGLE = 137.508;
+
+const hashString = (str: string): number => {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash);
+};
+
+const generateCategoryColor = (categoryName: string): string => {
+  const hash = hashString(categoryName);
+
+  // Use hash to determine position in golden angle sequence
+  const hue = (hash * GOLDEN_ANGLE) % 360;
+
+  // Vary saturation and lightness slightly based on hash
+  // to create more variation while keeping colors vibrant
+  const saturation = 65 + (hash % 20); // 65-85%
+  const lightness = 50 + ((hash >> 8) % 15); // 50-65%
+
+  return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+};
+
+// Generate color with transparency for overlays/backgrounds
+const generateCategoryColorWithAlpha = (categoryName: string, alpha: number): string => {
+  const hash = hashString(categoryName);
+  const hue = (hash * GOLDEN_ANGLE) % 360;
+  const saturation = 65 + (hash % 20);
+  const lightness = 50 + ((hash >> 8) % 15);
+
+  return `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha})`;
+};
+
+// Generate complementary colors for light/dark mode
+const generateCategoryThemeColors = (categoryName: string) => {
+  const hash = hashString(categoryName);
+  const hue = (hash * GOLDEN_ANGLE) % 360;
+
+  return {
+    light: {
+      bg: `hsl(${hue}, 70%, 95%)`,
+      text: `hsl(${hue}, 70%, 35%)`,
+      border: `hsl(${hue}, 60%, 80%)`
+    },
+    dark: {
+      bg: `hsl(${hue}, 40%, 20%)`,
+      text: `hsl(${hue}, 70%, 75%)`,
+      border: `hsl(${hue}, 50%, 30%)`
+    }
+  };
+};
+
 // Components remain the same
 const Header = ({ darkMode, setDarkMode, onImportClick, searchTerm, setSearchTerm, onSettingsClick }) => {
   return (
@@ -656,45 +714,11 @@ const MonthlySpendingChart = ({ data, categories }) => {
     setHoveredSegment(null);
   };
 
-  // Generate consistent color for any category using hash
-  const getCategoryColor = (category) => {
-    // Predefined colors for common categories
-    const predefinedColors = {
-      'AI Services': '#8b5cf6',
-      'Cloud Services': '#3b82f6',
-      'Entertainment': '#ec4899',
-      'Health & Fitness': '#10b981',
-      'Transportation': '#f59e0b',
-      'Food & Dining': '#ef4444',
-      'Shopping': '#06b6d4',
-      'Services': '#84cc16',
-      'Insurance': '#f97316',
-      'Parking': '#64748b',
-      'Uncategorized': '#9ca3af'
-    };
-    
-    if (predefinedColors[category]) {
-      return predefinedColors[category];
-    }
-    
-    // Generate deterministic color from category name
-    let hash = 0;
-    for (let i = 0; i < category.length; i++) {
-      hash = category.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    
-    // Create a vibrant color palette
-    const hue = Math.abs(hash % 360);
-    const saturation = 60 + (Math.abs(hash) % 20); // 60-80%
-    const lightness = 50 + (Math.abs(hash >> 8) % 15); // 50-65%
-    
-    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-  };
-
+  // Use the golden angle color generator for consistent colors
   const categoryColors = useMemo(() => {
-    const colors = {};
+    const colors: Record<string, string> = {};
     categories.forEach(cat => {
-      colors[cat] = getCategoryColor(cat);
+      colors[cat] = generateCategoryColor(cat);
     });
     return colors;
   }, [categories]);
