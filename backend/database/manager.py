@@ -37,6 +37,12 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_date ON transactions(date);
             CREATE INDEX IF NOT EXISTS idx_category ON transactions(category);
             CREATE INDEX IF NOT EXISTS idx_merchant ON transactions(merchant);
+            
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.conn.commit()
     

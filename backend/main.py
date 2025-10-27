@@ -6,8 +6,13 @@ from database.manager import DatabaseManager
 from parsers.csv_parser import CSVParser
 from parsers.pdf_parser import PDFParser
 from ml.categorizer import MLCategorizer
+from utils.auth import hash_password, verify_password, change_password
 from typing import Dict, Any, Optional, List
 import logging
+import csv
+import json
+import os
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
