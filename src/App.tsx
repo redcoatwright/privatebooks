@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import LoginScreen from './components/LoginScreen';
 import ProfilePage from './components/ProfilePage';
+import SameMerchantModal, { type SameMerchantTransaction } from './components/SameMerchantModal';
 
 // Golden Angle Color Generator
 // Uses the golden angle (137.508°) to generate maximally distinct hues
@@ -339,8 +340,30 @@ const CategoryFilterDropdown = ({
   );
 };
 
+interface BulkUpdateCategoryResult {
+  success: boolean;
+  error?: string;
+  updated?: number;
+  learned_patterns?: number;
+  message?: string;
+}
+
+interface SameMerchantLookupResult {
+  success: boolean;
+  error?: string;
+  merchant?: string;
+  transactions?: SameMerchantTransaction[];
+  total?: number;
+}
+
+interface SameMerchantPrompt {
+  merchant: string;
+  category: string;
+  transactions: SameMerchantTransaction[];
+}
+
 const TransactionTable = ({ transactions, onUpdate }) => {
-  const [selectedRows, setSelectedRows] = useState(new Set());
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [editingId, setEditingId] = useState(null);
   const [editCategory, setEditCategory] = useState('');
   const [availableCategories, setAvailableCategories] = useState([]);
@@ -349,6 +372,13 @@ const TransactionTable = ({ transactions, onUpdate }) => {
   const [sortConfig, setSortConfig] = useState({ key: 'date', direction: 'desc' });
   const [selectedCategories, setSelectedCategories] = useState(new Set());
   const [isCategoryFilterOpen, setIsCategoryFilterOpen] = useState(false);
+  const [bulkCategory, setBulkCategory] = useState<string>('');
+  const [bulkApplying, setBulkApplying] = useState<boolean>(false);
+  const [sameMerchantPrompt, setSameMerchantPrompt] = useState<SameMerchantPrompt | null>(null);
+  const [sameMerchantApplying, setSameMerchantApplying] = useState<boolean>(false);
+  // Anchor row for shift+click range selection
+  const lastClickedIdRef = React.useRef<string | null>(null);
+  const selectAllCheckboxRef = React.useRef<HTMLInputElement>(null);
 
   // Load categories on mount
   useEffect(() => {
@@ -420,6 +450,182 @@ const TransactionTable = ({ transactions, onUpdate }) => {
     return result;
   }, [transactions, selectedCategories, sortConfig]);
 
+  // Ids of the rows currently visible, in display order
+  const visibleIds = useMemo<string[]>(
+    () => processedTransactions.map((t: any) => String(t.id)),
+    [processedTransactions]
+  );
+
+  // Only visible rows ever count as selected, so a bulk action can't touch hidden rows
+  const selectedVisibleIds = useMemo<string[]>(
+    () => visibleIds.filter((id: string) => selectedRows.has(id)),
+    [visibleIds, selectedRows]
+  );
+  const selectedCount = selectedVisibleIds.length;
+  const allVisibleSelected = visibleIds.length > 0 && selectedCount === visibleIds.length;
+  const someVisibleSelected = selectedCount > 0 && !allVisibleSelected;
+
+  // Prune selection when the visible rows change (filter change, reload, delete)
+  useEffect(() => {
+    const visible = new Set<string>(visibleIds);
+    setSelectedRows((prev: Set<string>) => {
+      if (prev.size === 0) return prev;
+      const next = new Set<string>();
+      prev.forEach((id: string) => {
+        if (visible.has(id)) next.add(id);
+      });
+      return next.size === prev.size ? prev : next;
+    });
+    if (lastClickedIdRef.current !== null && !visible.has(lastClickedIdRef.current)) {
+      lastClickedIdRef.current = null;
+    }
+  }, [visibleIds]);
+
+  // Header checkbox shows a dash when only some visible rows are selected
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
+
+  const handleToggleAllVisible = () => {
+    setSelectedRows(allVisibleSelected ? new Set<string>() : new Set<string>(visibleIds));
+    lastClickedIdRef.current = null;
+  };
+
+  const handleRowCheckboxChange = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    rowId: string
+  ) => {
+    // React fires checkbox onChange from the native click, so shiftKey is available there
+    const shiftKey = (e.nativeEvent as MouseEvent).shiftKey === true;
+    const anchorId = lastClickedIdRef.current;
+    const anchorIndex = anchorId !== null ? visibleIds.indexOf(anchorId) : -1;
+    const currentIndex = visibleIds.indexOf(rowId);
+
+    if (shiftKey) {
+      // Shift+click extends a text selection across the table; drop it
+      window.getSelection()?.removeAllRanges();
+    }
+
+    setSelectedRows((prev: Set<string>) => {
+      const next = new Set<string>(prev);
+      if (shiftKey && anchorIndex !== -1 && currentIndex !== -1 && anchorIndex !== currentIndex) {
+        // Apply the clicked row's new state to the whole range between anchor and this row
+        const select = !prev.has(rowId);
+        const start = Math.min(anchorIndex, currentIndex);
+        const end = Math.max(anchorIndex, currentIndex);
+        for (let i = start; i <= end; i++) {
+          if (select) {
+            next.add(visibleIds[i]);
+          } else {
+            next.delete(visibleIds[i]);
+          }
+        }
+      } else if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
+      }
+      return next;
+    });
+    lastClickedIdRef.current = rowId;
+  };
+
+  const clearSelection = () => {
+    setSelectedRows(new Set<string>());
+    setBulkCategory('');
+    lastClickedIdRef.current = null;
+  };
+
+  const handleBulkApply = async () => {
+    const category = bulkCategory.trim();
+    const ids = selectedVisibleIds;
+    if (!category || ids.length === 0 || bulkApplying) return;
+
+    setBulkApplying(true);
+    try {
+      const result = await invoke<BulkUpdateCategoryResult>('bulk_update_category', {
+        transactionIds: ids,
+        category,
+      });
+
+      if (result?.success) {
+        await loadCategories();
+        await onUpdate();
+        // Close an inline editor on an updated row so saving it can't revert the bulk change
+        setEditingId((prev: any) => (prev !== null && ids.includes(String(prev)) ? null : prev));
+        clearSelection();
+      } else {
+        alert(`Failed to update: ${result?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error bulk updating transactions:', error);
+      alert(`Error: ${error}`);
+    } finally {
+      setBulkApplying(false);
+    }
+  };
+
+  const handleBulkKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void handleBulkApply();
+    } else if (e.key === 'Escape') {
+      setBulkCategory('');
+    }
+  };
+
+  // After a single category edit, offer to apply it to the merchant's other transactions.
+  // The edit itself already succeeded, so failures here are logged, never alerted.
+  const promptSameMerchant = async (transactionId: string, category: string, fallbackMerchant: string) => {
+    try {
+      const result = await invoke<SameMerchantLookupResult>('find_same_merchant_transactions', {
+        transactionId,
+        excludeCategory: category,
+      });
+
+      if (result?.success && Array.isArray(result.transactions) && result.transactions.length > 0) {
+        setSameMerchantPrompt({
+          merchant: result.merchant || fallbackMerchant,
+          category,
+          transactions: result.transactions,
+        });
+      } else if (!result?.success) {
+        console.error('Error finding same-merchant transactions:', result?.error);
+      }
+    } catch (error) {
+      console.error('Error finding same-merchant transactions:', error);
+    }
+  };
+
+  const handleSameMerchantApply = async (ids: string[]) => {
+    if (!sameMerchantPrompt || ids.length === 0) return;
+
+    setSameMerchantApplying(true);
+    try {
+      const result = await invoke<BulkUpdateCategoryResult>('bulk_update_category', {
+        transactionIds: ids,
+        category: sameMerchantPrompt.category,
+      });
+
+      if (result?.success) {
+        await loadCategories();
+        await onUpdate();
+        // Close an inline editor on an updated row so saving it can't revert the bulk change
+        setEditingId((prev: any) => (prev !== null && ids.includes(String(prev)) ? null : prev));
+        setSameMerchantPrompt(null);
+      } else {
+        alert(`Failed to update: ${result?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error updating same-merchant transactions:', error);
+      alert(`Error: ${error}`);
+    } finally {
+      setSameMerchantApplying(false);
+    }
+  };
+
   const handleSort = (columnKey) => {
     setSortConfig(prev => ({
       key: columnKey,
@@ -480,25 +686,33 @@ const TransactionTable = ({ transactions, onUpdate }) => {
     setEditCategory(transaction.category);
   };
 
-  const handleSave = async (transactionId) => {
-    if (!editCategory.trim()) {
+  const handleSave = async (transactionId: string) => {
+    const newCategory = editCategory.trim();
+    if (!newCategory) {
       alert('Category cannot be empty');
       return;
     }
 
+    // Capture the pre-edit values before the reload replaces them
+    const original = processedTransactions.find((t: any) => t.id === transactionId);
+    const previousCategory: string | undefined = original?.category;
+    const originalMerchant: string = original?.merchant ?? '';
+    let categoryChanged = false;
+
     setSaving(true);
     try {
-      const result = await invoke('update_transaction', {
+      const result = await invoke<any>('update_transaction', {
         transactionId: transactionId,
-        updates: { category: editCategory.trim() }
+        updates: { category: newCategory }
       });
-      
+
       if (result?.success) {
         // Reload categories and transactions
         await loadCategories();
         await onUpdate();
         setEditingId(null);
         setEditCategory('');
+        categoryChanged = newCategory !== previousCategory;
       } else {
         alert(`Failed to update: ${result?.error || 'Unknown error'}`);
       }
@@ -507,6 +721,10 @@ const TransactionTable = ({ transactions, onUpdate }) => {
       alert(`Error: ${error}`);
     } finally {
       setSaving(false);
+    }
+
+    if (categoryChanged) {
+      await promptSameMerchant(transactionId, newCategory, originalMerchant);
     }
   };
 
@@ -539,7 +757,7 @@ const TransactionTable = ({ transactions, onUpdate }) => {
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden">
+    <div className={`bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden ${selectedCount > 0 ? 'mb-24' : ''}`}>
       <div className="p-6 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-800 dark:to-gray-900">
         <div className="flex items-center justify-between">
           <div>
@@ -550,12 +768,70 @@ const TransactionTable = ({ transactions, onUpdate }) => {
           </div>
         </div>
       </div>
-      
+
+      {/* Floating (fixed) so it never shifts the rows under the pointer and stays
+          reachable while scrolled; z-40 keeps it below SameMerchantModal (z-50) */}
+      {selectedCount > 0 && (
+        <div
+          role="toolbar"
+          aria-label="Bulk actions"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 w-[min(48rem,calc(100vw-3rem))] px-4 py-3 rounded-xl shadow-2xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 flex flex-wrap items-center gap-3"
+        >
+          <span className="text-sm font-semibold text-blue-900 dark:text-blue-200 whitespace-nowrap">
+            {selectedCount} selected
+          </span>
+          <div className="flex items-center gap-2 flex-1 min-w-[16rem]">
+            <Tag className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <input
+              type="text"
+              value={bulkCategory}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setBulkCategory(e.target.value)}
+              onKeyDown={handleBulkKeyDown}
+              list="bulk-category-suggestions"
+              placeholder="Set category for selected..."
+              aria-label="Category for selected transactions"
+              disabled={bulkApplying}
+              className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <datalist id="bulk-category-suggestions">
+              {availableCategories.map(cat => (
+                <option key={cat} value={cat} />
+              ))}
+            </datalist>
+            <button
+              onClick={() => void handleBulkApply()}
+              disabled={!bulkCategory.trim() || bulkApplying}
+              className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              {bulkApplying ? 'Applying...' : 'Apply category'}
+            </button>
+          </div>
+          <button
+            onClick={clearSelection}
+            disabled={bulkApplying}
+            className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-blue-100 dark:hover:bg-blue-900/40 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
+
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead className="bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
             <tr>
-              <th 
+              <th className="pl-6 pr-2 py-4 w-10 text-left">
+                <input
+                  ref={selectAllCheckboxRef}
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={handleToggleAllVisible}
+                  disabled={visibleIds.length === 0}
+                  aria-label="Select all visible transactions"
+                  className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                />
+              </th>
+              <th
                 onClick={() => handleSort('date')}
                 className="px-6 py-4 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
               >
@@ -596,8 +872,23 @@ const TransactionTable = ({ transactions, onUpdate }) => {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-            {processedTransactions.map((transaction) => (
-              <tr key={transaction.id} className="hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+            {processedTransactions.map((transaction) => {
+              const rowId = String(transaction.id);
+              const isSelected = selectedRows.has(rowId);
+              return (
+              <tr
+                key={transaction.id}
+                className={`${isSelected ? 'bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30' : 'hover:bg-gray-50 dark:hover:bg-gray-700'} transition-colors`}
+              >
+                <td className="pl-6 pr-2 py-4 w-10">
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleRowCheckboxChange(e, rowId)}
+                    aria-label={`Select transaction ${transaction.merchant} on ${transaction.date}`}
+                    className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  />
+                </td>
                 <td className="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">
                   {new Date(transaction.date).toLocaleDateString()}
                 </td>
@@ -683,10 +974,22 @@ const TransactionTable = ({ transactions, onUpdate }) => {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {sameMerchantPrompt && (
+        <SameMerchantModal
+          merchant={sameMerchantPrompt.merchant}
+          category={sameMerchantPrompt.category}
+          transactions={sameMerchantPrompt.transactions}
+          applying={sameMerchantApplying}
+          onApply={handleSameMerchantApply}
+          onClose={() => setSameMerchantPrompt(null)}
+        />
+      )}
     </div>
   );
 };
