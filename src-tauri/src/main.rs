@@ -127,6 +127,31 @@ fn update_transaction(transaction_id: String, updates: Value) -> Result<Value, S
 }
 
 #[tauri::command]
+fn bulk_update_category(transaction_ids: Vec<String>, category: String) -> Result<Value, String> {
+    call_python_api(
+        "bulk_update_category",
+        json!({
+            "transaction_ids": transaction_ids,
+            "category": category
+        })
+    )
+}
+
+#[tauri::command]
+fn find_same_merchant_transactions(
+    transaction_id: String,
+    exclude_category: Option<String>
+) -> Result<Value, String> {
+    call_python_api(
+        "find_same_merchant_transactions",
+        json!({
+            "transaction_id": transaction_id,
+            "exclude_category": exclude_category
+        })
+    )
+}
+
+#[tauri::command]
 fn delete_transaction(transaction_id: String) -> Result<Value, String> {
     call_python_api(
         "delete_transaction",
@@ -253,6 +278,8 @@ fn main() {
             get_category_breakdown,
             get_trends,
             update_transaction,
+            bulk_update_category,
+            find_same_merchant_transactions,
             delete_transaction,
             get_categories,
             check_password_status,

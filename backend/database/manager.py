@@ -8,6 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
+    # Max ids bound into a single "IN (...)" list. Older SQLite builds cap a
+    # statement at 999 host parameters, so stay comfortably below that.
+    MAX_IN_PARAMS = 500
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
@@ -143,6 +147,22 @@ class DatabaseManager:
         cursor = self.conn.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_transactions_by_ids(self, transaction_ids: List[str]) -> List[Dict]:
+        """Retrieve the transactions whose ids are in the list (unknown ids are skipped)"""
+        unique_ids = list(dict.fromkeys(transaction_ids))
+        results: List[Dict] = []
+
+        for start in range(0, len(unique_ids), self.MAX_IN_PARAMS):
+            chunk = unique_ids[start:start + self.MAX_IN_PARAMS]
+            placeholders = ', '.join('?' for _ in chunk)
+            cursor = self.conn.execute(
+                f"SELECT * FROM transactions WHERE id IN ({placeholders})",
+                chunk
+            )
+            results.extend(dict(row) for row in cursor.fetchall())
+
+        return results
+
     def update_transaction(self, transaction_id: str, updates: Dict) -> bool:
         """Update a transaction"""
         try:
@@ -167,6 +187,37 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Update error: {e}")
             return False
+
+    def bulk_update_category(self, transaction_ids: List[str], category: str) -> int:
+        """
+        Set the same category on many transactions and mark them as user-set.
+
+        Every chunk runs inside one database transaction with a single commit,
+        so either all rows are updated or (on error) none are.
+        Returns the number of rows updated.
+        """
+        self.ensure_category_exists(category)
+
+        unique_ids = list(dict.fromkeys(transaction_ids))
+        updated = 0
+
+        try:
+            for start in range(0, len(unique_ids), self.MAX_IN_PARAMS):
+                chunk = unique_ids[start:start + self.MAX_IN_PARAMS]
+                placeholders = ', '.join('?' for _ in chunk)
+                cursor = self.conn.execute(
+                    f"UPDATE transactions "
+                    f"SET category = ?, confidence = 1.0, user_modified = 1 "
+                    f"WHERE id IN ({placeholders})",
+                    [category, *chunk]
+                )
+                updated += cursor.rowcount
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return updated
 
     def get_category_spending(self, start_date: str, end_date: str) -> Dict[str, float]:
         """Get spending breakdown by category"""
