@@ -49,24 +49,14 @@ class MLCategorizer:
     
     def categorize(self, transaction: Dict[str, Any]) -> Tuple[str, float]:
         """
-        Categorize a transaction
+        Categorize a transaction.
+        
+        DUMMY IMPLEMENTATION: Always returns 'Uncategorized' with 0.0 confidence.
+        This is a placeholder for the future ML model.
+        
         Returns: (category, confidence)
         """
-        description = transaction.get('description', '').lower()
-        merchant = transaction.get('merchant', '').lower()
-        combined = f"{merchant} {description}"
-        
-        # Check rules
-        for keyword, category in self.rules.items():
-            if keyword in combined:
-                return category, 0.9  # High confidence for rule match
-        
-        # Check for income (positive amounts)
-        if transaction.get('amount', 0) > 0:
-            return 'Income', 0.8
-        
-        # Default
-        return 'Uncategorized', 0.0
+        return ('Uncategorized', 0.0)
     
     def train(self, transactions: List[Dict[str, Any]]):
         """Train the model with user-corrected transactions"""

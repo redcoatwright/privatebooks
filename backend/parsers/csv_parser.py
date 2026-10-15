@@ -23,26 +23,24 @@ class CSVParser:
             # Clean column names
             df.columns = df.columns.str.strip()
             
-            # Map columns
             column_mapping = self._detect_columns(df.columns)
             
             for _, row in df.iterrows():
+                ref_num = None
+                if 'reference_number' in column_mapping:
+                    ref_num = str(row[column_mapping['reference_number']])
+                
                 transaction = {
                     'id': f"txn_{secrets.token_hex(8)}",
+                    'reference_number': ref_num,
                     'date': self._parse_date(row[column_mapping['date']]),
                     'merchant': self._extract_merchant(row[column_mapping['merchant']]),
                     'description': str(row[column_mapping['merchant']]),
                     'amount': float(row[column_mapping['amount']]),
                     'category': 'Uncategorized',
-                    'confidence': 0.0
+                    'confidence': 0.0,
+                    'user_modified': False
                 }
-                
-                # Use existing category if available
-                if 'category' in column_mapping and column_mapping['category'] in row:
-                    existing_cat = row[column_mapping['category']]
-                    if pd.notna(existing_cat):
-                        transaction['category'] = str(existing_cat)
-                        transaction['confidence'] = 1.0
                 
                 transactions.append(transaction)
             
@@ -65,8 +63,8 @@ class CSVParser:
                 mapping['merchant'] = col
             elif 'amount' in col_lower:
                 mapping['amount'] = col
-            elif 'category' in col_lower:
-                mapping['category'] = col
+            elif 'reference' in col_lower or 'ref' in col_lower:
+                mapping['reference_number'] = col
         
         return mapping
     
@@ -79,24 +77,11 @@ class CSVParser:
             return str(date_str)
     
     def _extract_merchant(self, description: str) -> str:
-        """Clean up merchant name from description"""
-        # Remove quotes and extra spaces
-        cleaned = str(description)
+        """Clean up merchant name from credit card description"""
+        cleaned = str(description).strip()
+        
         cleaned = re.sub(r'"', '', cleaned)
+        
         cleaned = re.sub(r'\s+', ' ', cleaned)
         
-        # Remove common prefixes
-        prefixes = ['WL *', 'SQSP* ', 'ABC*']
-        for prefix in prefixes:
-            if cleaned.startswith(prefix):
-                cleaned = cleaned[len(prefix):]
-        
-        # Take first few meaningful words
-        parts = cleaned.split()
-        if parts:
-            # Remove trailing location codes
-            merchant = ' '.join(parts[:3])
-            merchant = re.sub(r'\s+[A-Z]{2}\s*$', '', merchant)
-            return merchant.strip()
-        
-        return cleaned[:50]
+        return cleaned[:100]

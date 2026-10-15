@@ -6,6 +6,7 @@ from database.manager import DatabaseManager
 from parsers.csv_parser import CSVParser
 from parsers.pdf_parser import PDFParser
 from ml.categorizer import MLCategorizer
+from ml.transaction_matcher import TransactionMatcher
 from utils.auth import hash_password, verify_password, change_password
 from typing import Dict, Any, Optional, List
 import logging
@@ -26,31 +27,54 @@ class BankAnalyzerAPI:
         self.pdf_parser = PDFParser()
         self.csv_parser = CSVParser()
         self.ml = MLCategorizer()
+        self.matcher = TransactionMatcher(self.db)
     
     def parse_csv(self, file_path: str) -> Dict[str, Any]:
-        """Parse CSV and return transactions"""
+        """Parse CSV and return transactions with smart categorization"""
         try:
-            # Parse the file
             transactions = self.csv_parser.parse(file_path)
             
-            # Auto-categorize if needed
+            new_transactions = []
+            updated_transactions = []
+            skipped_duplicates = []
+            learned_applied = 0
+            
             for txn in transactions:
-                if txn.get('category', 'Uncategorized') == 'Uncategorized':
+                existing = self.matcher.find_existing_transaction(txn)
+                
+                if existing:
+                    skipped_duplicates.append(existing)
+                    logger.info(f"Skipping duplicate: {txn.get('reference_number', 'N/A')} - {txn['merchant']}")
+                    continue
+                
+                learned_cat = self.matcher.get_learned_category(txn['merchant'])
+                
+                if learned_cat:
+                    category, confidence = learned_cat
+                    txn['category'] = category
+                    txn['confidence'] = confidence
+                    txn['user_modified'] = False
+                    learned_applied += 1
+                    logger.info(f"Applied learned category '{category}' (conf: {confidence:.2f}) to {txn['merchant']}")
+                else:
                     category, confidence = self.ml.categorize(txn)
                     txn['category'] = category
                     txn['confidence'] = confidence
-            
-            # Save to database
-            for txn in transactions:
+                    txn['user_modified'] = False
+                    logger.info(f"No learned pattern for {txn['merchant']}, using dummy categorizer")
+                
                 self.db.save_transaction(txn)
+                new_transactions.append(txn)
             
             return {
                 'success': True,
-                'transactions': transactions,
-                'count': len(transactions)
+                'transactions': new_transactions,
+                'count': len(new_transactions),
+                'duplicates_skipped': len(skipped_duplicates),
+                'learned_categories_applied': learned_applied
             }
         except Exception as e:
-            logger.error(f"CSV parsing error: {e}")
+            logger.error(f"CSV parsing error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
     def parse_pdf(self, file_path: str) -> Dict[str, Any]:
@@ -91,18 +115,27 @@ class BankAnalyzerAPI:
         
 
     def update_transaction(self, transaction_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
-        """Update a transaction (mainly for category updates)"""
+        """Update a transaction and learn from category changes"""
         try:
-            # If category is being updated, recalculate confidence
             if 'category' in updates:
-                updates['confidence'] = 1.0  # User-corrected categories have high confidence
+                updates['confidence'] = 1.0
+                updates['user_modified'] = True
+                
+                existing = self.db.get_transactions({'id': transaction_id})
+                if existing and len(existing) > 0:
+                    transaction = existing[0]
+                    transaction['category'] = updates['category']
+                    
+                    self.matcher.learn_from_transaction(transaction)
+                    logger.info(f"Learned from user update: {transaction['merchant']} -> {updates['category']}")
             
             success = self.db.update_transaction(transaction_id, updates)
             
             if success:
                 return {
                     'success': True,
-                    'message': 'Transaction updated successfully'
+                    'message': 'Transaction updated successfully',
+                    'learned': 'category' in updates
                 }
             else:
                 return {
@@ -110,9 +143,9 @@ class BankAnalyzerAPI:
                     'error': 'Failed to update transaction'
                 }
         except Exception as e:
-            logger.error(f"Update transaction error: {e}")
+            logger.error(f"Update transaction error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
-    
+
     def delete_transaction(self, transaction_id: str) -> Dict[str, Any]:
         """Delete a transaction"""
         try:
